@@ -1,0 +1,104 @@
+deploy-develop:
+  stage: deploy
+  tags:
+    - local-k3d
+  resource_group: k3d-develop
+  script:
+    - apk add --no-cache bash curl docker-cli git
+    - |
+      bash -euo pipefail <<'SCRIPT'
+
+      set -euo pipefail
+
+      case "$(uname -m)" in
+        x86_64)
+          BINARY_ARCH="amd64"
+          ;;
+        aarch64)
+          BINARY_ARCH="arm64"
+          ;;
+        *)
+          echo "Nieobsługiwana architektura runnera: $(uname -m)" >&2
+          exit 1
+          ;;
+      esac
+
+      KUBECTL_VERSION="${KUBECTL_VERSION:-$(curl -fsSL https://dl.k8s.io/release/stable.txt)}"
+      curl -fsSL \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${BINARY_ARCH}/kubectl" \
+        -o /usr/local/bin/kubectl
+      curl -fsSL \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${BINARY_ARCH}/kubectl.sha256" \
+        -o /tmp/kubectl.sha256
+      KUBECTL_CHECKSUM="$(tr -d '[:space:]' < /tmp/kubectl.sha256)"
+      if ! [[ "${KUBECTL_CHECKSUM}" =~ ^[[:xdigit:]]{64}$ ]]; then
+        echo "Niepoprawny format sumy kontrolnej kubectl." >&2
+        exit 1
+      fi
+      ACTUAL_CHECKSUM="$(sha256sum /usr/local/bin/kubectl | awk '{print $1}')"
+      if [[ "${ACTUAL_CHECKSUM}" != "${KUBECTL_CHECKSUM}" ]]; then
+        echo "Suma kontrolna pobranego kubectl jest niezgodna." >&2
+        exit 1
+      fi
+      chmod +x /usr/local/bin/kubectl
+
+      K3D_VERSION="${K3D_VERSION:-v5.9.0}"
+      curl -fsSL \
+        "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-${BINARY_ARCH}" \
+        -o /usr/local/bin/k3d
+      chmod +x /usr/local/bin/k3d
+
+      CLUSTER_NAME="${K3D_CLUSTER_NAME:-localdeploy}"
+      KUBE_CONTEXT="k3d-${CLUSTER_NAME}"
+      APP_NAME="${K3D_APP_NAME:?Set K3D_APP_NAME in the application project}"
+      APP_PORT="${K3D_APP_PORT:?Set K3D_APP_PORT in the application project}"
+      IMAGE="${APP_NAME}:${CI_COMMIT_SHA}"
+
+      if ! [[ "${APP_NAME}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || ((${#APP_NAME} > 63)); then
+        echo "K3D_APP_NAME must be a Kubernetes DNS label (max 63 characters)." >&2
+        exit 1
+      fi
+
+      if ! [[ "${APP_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] || ((APP_PORT > 65535)); then
+        echo "K3D_APP_PORT must be a port between 1 and 65535." >&2
+        exit 1
+      fi
+
+      git fetch --quiet origin "${CI_COMMIT_BRANCH}"
+      LATEST_COMMIT="$(git rev-parse FETCH_HEAD)"
+      if [[ "${CI_COMMIT_SHA}" != "${LATEST_COMMIT}" ]]; then
+        echo "Pomijam wdrożenie nieaktualnego commita ${CI_COMMIT_SHA}."
+        exit 0
+      fi
+
+      docker info >/dev/null
+      kubectl --context "${KUBE_CONTEXT}" cluster-info >/dev/null
+
+      docker build -t "${IMAGE}" .
+      k3d image import "${IMAGE}" --cluster "${CLUSTER_NAME}"
+
+      for namespace in dev live; do
+        kubectl --context "${KUBE_CONTEXT}" create namespace "${namespace}" \
+          --dry-run=client -o yaml |
+          kubectl --context "${KUBE_CONTEXT}" apply -f -
+      done
+
+      kubectl --context "${KUBE_CONTEXT}" -n dev create deployment "${APP_NAME}" \
+        --image="${IMAGE}" \
+        --port="${APP_PORT}" \
+        --dry-run=client -o yaml |
+        kubectl --context "${KUBE_CONTEXT}" -n dev apply -f -
+
+      kubectl --context "${KUBE_CONTEXT}" -n dev expose deployment "${APP_NAME}" \
+        --port="${APP_PORT}" \
+        --target-port="${APP_PORT}" \
+        --dry-run=client -o yaml |
+        kubectl --context "${KUBE_CONTEXT}" -n dev apply -f -
+
+      kubectl --context "${KUBE_CONTEXT}" -n dev rollout status "deployment/${APP_NAME}" \
+        --timeout=180s
+      SCRIPT
+  environment:
+    name: develop
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop" && $K3D_DEPLOY_ENABLED == "true"'

@@ -1,0 +1,42 @@
+stages:
+  - build
+  - test
+  - review
+  - approval_check
+  - deploy
+  - release
+
+default:
+  image: alpine:latest
+
+variables:
+  K3D_DEPLOY_ENABLED: "true"
+  K3D_APP_NAME: "hello-service"
+  K3D_APP_PORT: "8040"
+  RELEASE_ENABLED: "true"
+
+build:
+  stage: build
+  image: golang:1.22
+  script:
+    - go mod download
+    - go build -o hello-service .
+  artifacts:
+    paths:
+      - hello-service
+
+test:
+  stage: test
+  image: golang:1.22
+  script:
+    - go mod download
+    - go test ./...
+
+include:
+  - project: 'SoftwareAutoDeploy/MainPipeline'
+    ref: main
+    file:
+      - '/Stages/Review/.gitlab-ci.yml'
+      - '/Stages/Approval/.gitlab-ci.yml'
+      - '/Stages/Deploy/.gitlab-ci.yml'
+      - '/Stages/Release/.gitlab-ci.yml'

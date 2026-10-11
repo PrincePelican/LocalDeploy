@@ -1,0 +1,10 @@
+review:
+  stage: review
+  script:
+    - apk add --no-cache bash curl jq git
+    - chmod +x ./Stages/Review/ai-review.sh
+    - ./Stages/Review/ai-review.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
+      when: manual
+      allow_failure: true

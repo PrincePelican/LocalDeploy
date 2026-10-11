@@ -1,0 +1,17 @@
+default:
+  image: alpine:latest
+
+stages:
+  - build
+  - test
+  - review
+  - approval_check
+  - deploy
+  - release
+include:
+  - local: '/Stages/Release/.gitlab-ci.yml'
+  - local: '/Stages/Approval/.gitlab-ci.yml'
+  - local: '/Stages/Test/.gitlab-ci.yml'
+  - local: '/Stages/Review/.gitlab-ci.yml'
+  - local: '/Stages/Deploy/.gitlab-ci.yml'
+  - local: '/Stages/Build/.gitlab-ci.yml'

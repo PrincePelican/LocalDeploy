@@ -1,0 +1,90 @@
+.release-common:
+  stage: release
+  script:
+    - apk add --no-cache bash curl jq
+    - |
+      bash <<'SCRIPT'
+      set -euo pipefail
+
+      if [[ -z "${RELEASE_TOKEN:-}" ]]; then
+        echo "Brak zmiennej RELEASE_TOKEN." >&2
+        exit 1
+      fi
+
+      api_url="${CI_API_V4_URL/http:\/\/localhost:8080/http:\/\/local-gitlab}"
+      curl_options=(--fail-with-body --silent --show-error --header "PRIVATE-TOKEN: ${RELEASE_TOKEN}")
+
+      case "${CI_COMMIT_BRANCH:-}" in
+        develop)
+          echo "Sprawdzam istniejący Merge Request develop -> main..."
+          merge_requests=$(curl "${curl_options[@]}" \
+            "${api_url}/projects/${CI_PROJECT_ID}/merge_requests?state=opened&source_branch=develop&target_branch=main")
+          merge_request_iid=$(printf '%s' "${merge_requests}" | jq -r '.[0].iid // empty')
+
+          if [[ -n "${merge_request_iid}" ]]; then
+            echo "Merge Request !${merge_request_iid} już istnieje."
+            exit 0
+          fi
+
+          echo "Tworzę Merge Request develop -> main..."
+          merge_request=$(curl "${curl_options[@]}" --request POST \
+            --data-urlencode "source_branch=develop" \
+            --data-urlencode "target_branch=main" \
+            --data-urlencode "title=Release develop -> main" \
+            "${api_url}/projects/${CI_PROJECT_ID}/merge_requests")
+          merge_request_iid=$(printf '%s' "${merge_request}" | jq -r '.iid // empty')
+
+          if [[ -z "${merge_request_iid}" ]]; then
+            echo "Nie udało się utworzyć Merge Requesta: ${merge_request}" >&2
+            exit 1
+          fi
+
+          echo "Utworzono Merge Request !${merge_request_iid}. Po sukcesie pipeline scal go w GitLabie."
+          ;;
+        main)
+          echo "Sprawdzam tagi release dla bieżącego commita..."
+          tags=$(curl "${curl_options[@]}" \
+            "${api_url}/projects/${CI_PROJECT_ID}/repository/tags?search=release.1.0.&per_page=100")
+          existing_tag=$(printf '%s' "${tags}" |
+            jq -r --arg sha "${CI_COMMIT_SHA}" \
+              '[.[] | select(.commit.id == $sha) | .name] | first // empty')
+
+          if [[ -n "${existing_tag}" ]]; then
+            echo "Commit ${CI_COMMIT_SHA} ma już tag ${existing_tag}."
+            exit 0
+          fi
+
+          latest_release=$(printf '%s' "${tags}" |
+            jq -r '.[].name' |
+            sed -n 's/^release\.1\.0\.\([0-9][0-9]*\)$/\1/p' |
+            sort -n |
+            tail -n 1)
+          next_release=$(( ${latest_release:-0} + 1 ))
+          tag_name="release.1.0.${next_release}"
+
+          echo "Tworzę tag ${tag_name} dla ${CI_COMMIT_SHA}..."
+          curl "${curl_options[@]}" --request POST \
+            --data-urlencode "tag_name=${tag_name}" \
+            --data-urlencode "ref=${CI_COMMIT_SHA}" \
+            --data-urlencode "message=Release ${tag_name}" \
+            "${api_url}/projects/${CI_PROJECT_ID}/repository/tags" \
+            >/dev/null
+          echo "Utworzono ${tag_name}."
+          ;;
+        *)
+          echo "Release obsługuje wyłącznie gałęzie develop i main." >&2
+          exit 1
+          ;;
+      esac
+      SCRIPT
+
+release-prepare:
+  extends: .release-common
+  rules:
+    - if: '$RELEASE_ENABLED == "true" && $CI_COMMIT_BRANCH == "develop"'
+      when: manual
+
+release-tag:
+  extends: .release-common
+  rules:
+    - if: '$RELEASE_ENABLED == "true" && $CI_COMMIT_BRANCH == "main"'
